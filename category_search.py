@@ -1,7 +1,6 @@
 import pandas as pd
 import os
 import time
-import random
 import re
 from urllib.parse import quote
 from playwright.sync_api import sync_playwright
@@ -9,10 +8,6 @@ from playwright.sync_api import sync_playwright
 # ================= ⚙️ CONFIGURATION =================
 PINCODE_FILE = "/Users/apple/Desktop/webscrape/operationalpincodesudupi.csv"
 OUTPUT_FILE = "/Users/apple/Desktop/webscrape/results/category_discovery_leads.csv"
-FINAL_OUTPUT = "/Users/apple/Desktop/webscrape/results/final_logistics_leads.csv"
-PROGRESS_FILE = "/Users/apple/Desktop/webscrape/results/category_discovery_progress.txt"
-
-# CSV columns
 OUTPUT_COLUMNS = ["Name", "Category", "Address", "Location", "Pincode", "Contact_Number"]
 
 # FULL LIST OF CATEGORIES
@@ -28,108 +23,57 @@ SEARCH_CATEGORIES = [
 ]
 
 # SETTINGS
-MAX_RESULTS_PER_SEARCH = 100  # Extract all available
-RESTART_BROWSER_EVERY = 15    # Restart frequently to keep Chrome fast
+MAX_RESULTS_PER_SEARCH = 60   # Good balance between speed and volume
+RESTART_BROWSER_EVERY = 20    # Restart browser every 20 searches
 # ====================================================
 
+# Ensure output directory exists
 os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
-def normalize_phone(phone):
-    """Standardize phone numbers to last 10 digits."""
-    if not phone or phone in ["Not Found", "N/A"]: return ""
-    digits = re.sub(r"\D", "", str(phone))
-    return digits[-10:] if len(digits) >= 10 else digits
-
-def extract_real_pincode(address, default_pincode):
-    """Extracts 6-digit pincode from address string. Fallback to default if not found."""
-    if not address: return default_pincode
-    match = re.search(r"\b(5\d{5})\b", address) # Looks for 5xxxxx (Karnataka pincodes)
-    return match.group(1) if match else default_pincode
-
-def extract_details(page, search_pincode):
-    """Robust extraction of all fields."""
-    data = {
-        "Name": "N/A", 
-        "Category": "N/A", 
-        "Address": "N/A", 
-        "Location": "N/A", 
-        "Pincode": search_pincode, 
-        "Contact_Number": "Not Found"
-    }
-    
-    # 1. Wait for Data Load (Dynamic)
+def extract_details(page):
+    """Extracts Name, Category, Address, Location, Contact_Number from Business Detail view."""
+    data = {"Name": "N/A", "Phone": "Not Found", "Category": "N/A", "Address": "N/A"}
     try:
-        # Wait for H1 (Name) or Directions button to ensure panel is ready
-        page.wait_for_selector("div[role='main'] h1", timeout=3000)
-    except:
-        pass # Proceed anyway, maybe it loaded fast
-
-    try:
-        # --- GET FULL TEXT FOR REGEX BACKUP ---
-        main_text = ""
-        try:
-            main_text = page.locator("div[role='main']").inner_text()
-        except: pass
-
-        # --- A. NAME ---
         try:
             name_el = page.locator("div[role='main'] h1").first
             if name_el.count() > 0:
-                name = name_el.inner_text()
-                if "Results" not in name:
-                    data["Name"] = name.strip()
+                text = name_el.inner_text()
+                if "Results" not in text:
+                    data["Name"] = text
         except: pass
 
-        # --- B. CONTACT NUMBER (Multi-Strategy) ---
-        phone_found = False
-        # Strategy 1: Aria Label Button
-        if not phone_found:
-            for selector in ["button[aria-label^='Phone:']", "button[aria-label^='Call:']"]:
-                if page.locator(selector).count() > 0:
-                    raw_ph = page.locator(selector).first.get_attribute("aria-label")
-                    data["Contact_Number"] = re.sub(r"\D", "", raw_ph)[-10:]
-                    phone_found = True
-                    break
-        
-        # Strategy 2: Regex on Main Text
-        if not phone_found and main_text:
-            # Matches +91 XXXXX XXXXX or 0XXXXX XXXXX
-            matches = re.findall(r'(?:\+91|0)?\s?(\d{5}\s?\d{5}|\d{4}\s?\d{6})', main_text)
-            for m in matches:
-                clean_num = re.sub(r"\D", "", m)
-                if len(clean_num) >= 10:
-                    data["Contact_Number"] = clean_num[-10:]
-                    phone_found = True
-                    break
+        try:
+            phone_btn = page.locator("button[aria-label^='Phone:']")
+            if phone_btn.count() > 0:
+                raw = phone_btn.first.get_attribute("aria-label")
+                data["Phone"] = (raw or "").replace("Phone:", "").strip()
+            else:
+                main_text = page.locator("div[role='main']").inner_text()
+                match = re.search(r'((\+91|0)?\s?\d{5}\s?\d{5})', main_text)
+                if match:
+                    data["Phone"] = match.group(0).strip()
+        except: pass
 
-        # --- C. CATEGORY ---
         try:
             cat_btn = page.locator("button[jsaction*='category']")
             if cat_btn.count() > 0:
                 data["Category"] = cat_btn.first.inner_text()
         except: pass
 
-        # --- D. ADDRESS & PINCODE ---
         try:
             addr_btn = page.locator("button[data-item-id='address']")
             if addr_btn.count() > 0:
-                raw_addr = addr_btn.first.get_attribute("aria-label").replace("Address:", "").strip()
-                data["Address"] = raw_addr
-                data["Location"] = raw_addr.split(",")[0] # First part is usually building/street
-                
-                # Extract REAL Pincode from Address
-                data["Pincode"] = extract_real_pincode(raw_addr, search_pincode)
+                raw = addr_btn.first.get_attribute("aria-label") or ""
+                data["Address"] = raw.replace("Address:", "").strip()
         except: pass
-
     except Exception:
         pass
-        
     return data
 
 def run_deep_discovery():
-    print("🤖 STARTING FINAL LOGISTICS DISCOVERY...", flush=True)
+    print("🤖 STARTING ROBUST DISCOVERY...", flush=True)
 
-    # --- 1. SETUP & RESUME LOGIC ---
+    # --- 1. SETUP ---
     if not os.path.exists(PINCODE_FILE):
         print(f"❌ Pincode file missing: {PINCODE_FILE}")
         return
@@ -141,32 +85,29 @@ def run_deep_discovery():
         zone_df.columns = cols
         pincode_col = next((c for c in cols if 'pincode' in c), cols[0])
         pincodes = zone_df[pincode_col].dropna().astype(str).str.replace(".0", "", regex=False).unique().tolist()
-        print(f"✅ Loaded {len(pincodes)} Operational Pincodes.")
+        print(f"✅ Loaded {len(pincodes)} Pincodes.")
     except Exception as e:
         print(f"❌ Error reading CSV: {e}")
         return
 
-    # Load Completed Progress (Resume)
-    completed_searches = set()
-    if os.path.exists(PROGRESS_FILE):
-        with open(PROGRESS_FILE, "r") as f:
-            for line in f:
-                if "," in line:
-                    completed_searches.add(tuple(line.strip().split(",", 1)))
-    print(f"🔄 Resuming... Skipping {len(completed_searches)} previously finished searches.")
-
-    # Load Existing Numbers (Deduplication)
-    existing_phones = set()
+    # Load Existing to prevent duplicates
+    existing_ids = set()
     if os.path.exists(OUTPUT_FILE):
         try:
-            df_exist = pd.read_csv(OUTPUT_FILE)
-            for ph in df_exist["Contact_Number"].dropna().astype(str):
-                norm = normalize_phone(ph)
-                if len(norm) == 10: existing_phones.add(norm)
-        except: pass
-    print(f"📋 Loaded {len(existing_phones)} existing contacts to avoid duplicates.\n")
+            df = pd.read_csv(OUTPUT_FILE)
+            for _, row in df.iterrows():
+                name = str(row.get("Name", "")).strip()
+                ph = str(row.get("Contact_Number", row.get("Phone", ""))).strip()
+                if name and ph:
+                    existing_ids.add((name, ph))
+            print(f"📋 Loaded {len(existing_ids)} existing leads to avoid duplicates.")
+        except Exception:
+            pass
 
-    # --- 2. MAIN BROWSER LOOP ---
+    write_header = not os.path.exists(OUTPUT_FILE)
+    print(f"📁 Writing to: {OUTPUT_FILE} (each lead written as soon as extracted)\n")
+
+    # --- 2. BROWSER LOOP ---
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, args=["--disable-blink-features=AutomationControlled"])
         context = browser.new_context(viewport={"width": 1280, "height": 720})
@@ -178,11 +119,7 @@ def run_deep_discovery():
             
             for cat_idx, category in enumerate(SEARCH_CATEGORIES):
                 
-                # CHECK RESUME
-                if (str(pincode), category) in completed_searches:
-                    continue
-
-                # RESTART BROWSER (Memory Safety)
+                # Restart browser to keep it fast
                 if cat_idx > 0 and cat_idx % RESTART_BROWSER_EVERY == 0:
                     page.close()
                     page = context.new_page()
@@ -192,33 +129,30 @@ def run_deep_discovery():
                 print(f"   🔎 Searching: {search_term}")
 
                 try:
-                    # LOAD SEARCH
+                    # LOAD
                     page.goto("https://www.google.com/maps/search/" + quote(search_term), timeout=60000)
                     
-                    # WAIT FOR RESULTS
+                    # WAIT
                     try:
                         page.wait_for_selector("a[href*='/place/'], div[role='heading']:has-text('No results')", timeout=10000)
                     except:
-                        print("      🔸 No results found (Timeout).")
-                        # Mark as done even if empty so we don't retry endlessly
-                        with open(PROGRESS_FILE, "a") as f: f.write(f"{pincode},{category}\n")
+                        print("      🔸 No results.")
                         continue
 
-                    # SCROLLING (Aggressive)
+                    # SCROLL (Wait a bit longer to ensure loading)
                     print("      📜 Scrolling...", end="", flush=True)
                     prev_count = 0
                     same_count = 0
-                    
                     while True:
                         try:
                             page.hover("div[role='feed']")
                             page.mouse.wheel(0, 5000)
-                            time.sleep(1) # Short wait
-                            curr_count = page.locator("a[href*='/place/']").count()
+                            time.sleep(2) # Wait 2 seconds for load
                             
+                            curr_count = page.locator("a[href*='/place/']").count()
                             if curr_count == prev_count:
                                 same_count += 1
-                                if same_count >= 3: break # Stop if no new results 3 times
+                                if same_count >= 2: break 
                             else:
                                 print(f".{curr_count}", end="", flush=True)
                                 same_count = 0
@@ -227,42 +161,53 @@ def run_deep_discovery():
                             if curr_count >= MAX_RESULTS_PER_SEARCH: break
                         except: break
                     
-                    print(f"\n      👀 Extracting {prev_count} listings...")
+                    print(f"\n      👀 Found {prev_count} listings. Extracting...")
 
-                    # EXTRACTION LOOP
+                    # EXTRACT
                     leads_buffer = []
                     for i in range(prev_count):
                         try:
-                            # CLICK ITEM
-                            page.locator("a[href*='/place/']").nth(i).click()
+                            # CLICK
+                            item = page.locator("a[href*='/place/']").nth(i)
+                            item.click()
                             
-                            # EXTRACT
-                            details = extract_details(page, pincode)
+                            # WAIT FOR DETAILS (Critical Step)
+                            # We wait for the H1 title to change from "Results" to the business name
+                            try:
+                                page.wait_for_selector("div[role='main'] h1", timeout=3000)
+                                time.sleep(0.5) # Slight buffer
+                            except: pass
+
+                            # GET DATA
+                            details = extract_details(page)
                             
-                            # VALIDATE & SAVE
-                            if details["Contact_Number"] != "Not Found" and details["Name"] != "Results":
-                                ph_norm = normalize_phone(details["Contact_Number"])
-                                
-                                # Check if Valid 10-digit number AND Not Duplicate
-                                if len(ph_norm) == 10 and ph_norm not in existing_phones:
-                                    existing_phones.add(ph_norm)
+                            # SAVE CHECK (accept if we have a phone; allow Name "N/A" when name selector fails)
+                            if details["Phone"] != "Not Found" and details["Name"] != "Results":
+                                uid = (details["Name"].strip(), details["Phone"].strip())
+                                if uid not in existing_ids:
+                                    existing_ids.add(uid)
                                     leads_buffer.append(details)
-                                    print(f"         📞 NEW: {details['Name']} | {details['Contact_Number']}")
-                        except: pass
+                                    # Build row with requested columns: Name, Category, Address, Location, Pincode, Contact_Number
+                                    row = {
+                                        "Name": details["Name"],
+                                        "Category": details["Category"],
+                                        "Address": details["Address"],
+                                        "Location": details["Address"],
+                                        "Pincode": pincode,
+                                        "Contact_Number": details["Phone"],
+                                    }
+                                    pd.DataFrame([row])[OUTPUT_COLUMNS].to_csv(
+                                        OUTPUT_FILE, mode="a", header=write_header, index=False
+                                    )
+                                    if write_header:
+                                        write_header = False
+                                    print(f"         📞 NEW: {details['Name']} | {details['Phone']}")
+                                    print(f"         💾 Written to CSV — refresh file to see")
+                        except Exception:
+                            pass
 
-                    # BATCH SAVE
-                    if leads_buffer:
-                        df = pd.DataFrame(leads_buffer)
-                        header = not os.path.exists(OUTPUT_FILE)
-                        df[OUTPUT_COLUMNS].to_csv(OUTPUT_FILE, mode='a', header=header, index=False)
-                        print(f"      💾 Saved {len(leads_buffer)} new leads.")
-                    else:
-                        print(f"      → 0 new leads (no phone found or all duplicates).")
-
-                    # MARK SEARCH AS COMPLETE
-                    completed_searches.add((str(pincode), category))
-                    with open(PROGRESS_FILE, "a") as f:
-                        f.write(f"{pincode},{category}\n")
+                    if not leads_buffer:
+                        print("      🔸 No new valid leads with phones found.")
 
                 except Exception as e:
                     print(f"      ⚠️ Search Error: {e}")
