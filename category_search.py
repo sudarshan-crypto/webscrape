@@ -8,7 +8,8 @@ from playwright.sync_api import sync_playwright
 # ================= ⚙️ CONFIGURATION =================
 PINCODE_FILE = "/Users/apple/Desktop/webscrape/operationalpincodesudupi.csv"
 OUTPUT_FILE = "/Users/apple/Desktop/webscrape/results/category_discovery_leads.csv"
-OUTPUT_COLUMNS = ["Name", "Category", "Address", "Location", "Pincode", "Contact_Number"]
+# Header row order: category, name, location, address, pincode, contact number
+OUTPUT_COLUMNS = ["Category", "Name", "Location", "Address", "Pincode", "Contact_Number"]
 
 # FULL LIST OF CATEGORIES
 SEARCH_CATEGORIES = [
@@ -34,13 +35,24 @@ def extract_details(page):
     """Extracts Name, Category, Address, Location, Contact_Number from Business Detail view."""
     data = {"Name": "N/A", "Phone": "Not Found", "Category": "N/A", "Address": "N/A"}
     try:
+        # NAME — try several selectors (Maps sometimes uses different structure)
         try:
-            name_el = page.locator("div[role='main'] h1").first
-            if name_el.count() > 0:
-                text = name_el.inner_text()
-                if "Results" not in text:
-                    data["Name"] = text
-        except: pass
+            time.sleep(0.3)
+            for selector in ["div[role='main'] h1", "h1.DUwDvf", "h1", "div[role='main'] [class*='fontHeadline']"]:
+                loc = page.locator(selector).first
+                if loc.count() > 0:
+                    text = loc.inner_text()
+                    if text and "Results" not in text and len(text) < 200:
+                        data["Name"] = text.strip()
+                        break
+            if data["Name"] == "N/A":
+                main = page.locator("div[role='main']")
+                if main.count() > 0:
+                    first_line = (main.inner_text() or "").split("\n")[0].strip()
+                    if first_line and "Results" not in first_line and len(first_line) < 200:
+                        data["Name"] = first_line
+        except Exception:
+            pass
 
         try:
             phone_btn = page.locator("button[aria-label^='Phone:']")
@@ -187,12 +199,12 @@ def run_deep_discovery():
                                 if uid not in existing_ids:
                                     existing_ids.add(uid)
                                     leads_buffer.append(details)
-                                    # Build row with requested columns: Name, Category, Address, Location, Pincode, Contact_Number
+                                    # Build row: category, name, location, address, pincode, contact number (header at top)
                                     row = {
-                                        "Name": details["Name"],
                                         "Category": details["Category"],
-                                        "Address": details["Address"],
+                                        "Name": details["Name"],
                                         "Location": details["Address"],
+                                        "Address": details["Address"],
                                         "Pincode": pincode,
                                         "Contact_Number": details["Phone"],
                                     }
